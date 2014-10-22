@@ -208,49 +208,76 @@ class _MergeOperation(object):
         return result
 
     def _maybe_add_join_keys(self, result, left_indexer, right_indexer):
-        # insert group keys
+
+        consolidate = False
+
+        left_has_missing = None
+        right_has_missing = None
 
         keys = zip(self.join_names, self.left_on, self.right_on)
         for i, (name, lname, rname) in enumerate(keys):
             if not _should_fill(lname, rname):
                 continue
 
+            take_left, take_right = None, None
+
             if name in result:
-                key_col = result[name]
 
                 if left_indexer is not None and right_indexer is not None:
-
                     if name in self.left:
-                        na_indexer = (left_indexer == -1).nonzero()[0]
-                        if len(na_indexer) == 0:
-                            continue
 
-                        right_na_indexer = right_indexer.take(na_indexer)
-                        key_col.put(
-                            na_indexer, com.take_1d(self.right_join_keys[i],
-                                                    right_na_indexer))
+                        if left_has_missing is None:
+                            left_has_missing = any(left_indexer == -1)
+
+                        if left_has_missing:
+                            take_right = self.right_join_keys[i]
+
+                            if result[name].dtype != self.left[name].dtype:
+                                take_left = self.left[name].values
+
                     elif name in self.right:
-                        na_indexer = (right_indexer == -1).nonzero()[0]
-                        if len(na_indexer) == 0:
-                            continue
 
-                        left_na_indexer = left_indexer.take(na_indexer)
-                        key_col.put(na_indexer, com.take_1d(self.left_join_keys[i],
-                                                            left_na_indexer))
+                        if right_has_missing is None:
+                            right_has_missing = any(right_indexer == -1)
+
+                        if right_has_missing:
+                            take_left = self.left_join_keys[i]
+
+                            if result[name].dtype != self.right[name].dtype:
+                                take_right = self.right[name].values
 
             elif left_indexer is not None \
                     and isinstance(self.left_join_keys[i], np.ndarray):
 
-                if name is None:
-                    name = 'key_%d' % i
+                take_left = self.left_join_keys[i]
+                take_right = self.right_join_keys[i]
 
-                # a faster way?
-                key_col = com.take_1d(self.left_join_keys[i], left_indexer)
-                na_indexer = (left_indexer == -1).nonzero()[0]
-                right_na_indexer = right_indexer.take(na_indexer)
-                key_col.put(na_indexer, com.take_1d(self.right_join_keys[i],
-                                                    right_na_indexer))
-                result.insert(i, name, key_col)
+            if take_left is not None or take_right is not None:
+
+                if take_left is None:
+                    lvals = result[name].values
+                else:
+                    lfill = take_left.dtype.type()
+                    lvals = com.take_1d(take_left, left_indexer, fill_value=lfill)
+
+                if take_right is None:
+                    rvals = result[name].values
+                else:
+                    rfill = take_right.dtype.type()
+                    rvals = com.take_1d(take_right, right_indexer, fill_value=rfill)
+
+                key_col = np.where(left_indexer != -1, lvals, rvals)
+
+                if name in result:
+                    if result[name].dtype != key_col.dtype:
+                        consolidate = True
+                    result[name] = key_col
+                else:
+                    result.insert(i, name or 'key_%d' % i, key_col)
+                    consolidate = True
+
+        if consolidate:
+            result.consolidate(inplace=True)
 
     def _get_join_info(self):
         left_ax = self.left._data.axes[self.axis]
